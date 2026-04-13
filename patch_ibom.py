@@ -22,7 +22,7 @@ def patch_html(input_file, output_file):
                 fields_str = fields_match.group(1)
                 fields = json.loads(fields_str)
                 added = False
-                for field in ["故障点", "故障现象"]:
+                for field in ["故障点", "故障现象", "故障图"]:
                     if field not in fields:
                         fields.append(field)
                         added = True
@@ -64,6 +64,79 @@ def patch_html(input_file, output_file):
       background-color: #fff;
       color: #000;
     }
+    /* 故障图单元格样式 */
+    .fault-image-cell {
+      cursor: pointer;
+      min-width: 60px;
+      text-align: center;
+      position: relative;
+    }
+    .fault-image-cell:hover {
+      background-color: rgba(0, 150, 255, 0.1);
+    }
+    .fault-image-cell.drag-over {
+      background-color: rgba(0, 150, 255, 0.3);
+      border: 2px dashed #0096ff;
+    }
+    .fault-image-cell .img-indicator {
+      font-size: 12px;
+      color: #666;
+    }
+    .fault-image-cell.has-image .img-indicator {
+      color: #0096ff;
+      font-weight: bold;
+    }
+    /* 图片弹窗样式 */
+    .image-modal {
+      display: none;
+      position: fixed;
+      z-index: 10000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.8);
+      justify-content: center;
+      align-items: center;
+    }
+    .image-modal.active {
+      display: flex;
+    }
+    .image-modal-content {
+      max-width: 90%;
+      max-height: 90%;
+      position: relative;
+    }
+    .image-modal-content img {
+      max-width: 100%;
+      max-height: 90vh;
+      border: 2px solid #fff;
+      border-radius: 4px;
+    }
+    .image-modal-close {
+      position: absolute;
+      top: -30px;
+      right: 0;
+      color: #fff;
+      font-size: 24px;
+      cursor: pointer;
+    }
+    .image-modal-delete {
+      position: absolute;
+      bottom: -40px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #ff4444;
+      color: #fff;
+      border: none;
+      padding: 8px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .image-modal-delete:hover {
+      background-color: #cc0000;
+    }
 """
     style_close = '</style>'
     idx = content.rfind(style_close)
@@ -72,6 +145,30 @@ def patch_html(input_file, output_file):
         print("  [OK] CSS injected before last </style>")
     else:
         print("  [WARN] </style> not found - CSS NOT injected")
+
+    # =========================================================================
+    # Step 2b: Change Sourced to Checked in config.checkboxes
+    # Also modify the initialization to force use config value instead of localStorage
+    # =========================================================================
+    print("\n[Step 2b] Changing Sourced to Checked...")
+    if '"checkboxes": "Sourced,Placed"' in content:
+        content = content.replace('"checkboxes": "Sourced,Placed"', '"checkboxes": "Checked,Placed"')
+        print("  [OK] Changed Sourced to Checked in config.checkboxes")
+    else:
+        print("  [WARN] Pattern '\"checkboxes\": \"Sourced,Placed\"' not found - may already be modified or different format")
+    
+    # Force use config.checkboxes instead of localStorage to ensure Checked is used
+    print("\n[Step 2c] Forcing config.checkboxes to override localStorage...")
+    old_logic = '''var bomCheckboxes = readStorage("bomCheckboxes");
+  if (bomCheckboxes === null) {
+    bomCheckboxes = config.checkboxes;
+  }'''
+    new_logic = '''var bomCheckboxes = config.checkboxes; // Force use config value, ignore localStorage'''
+    if old_logic in content:
+        content = content.replace(old_logic, new_logic)
+        print("  [OK] Forced config.checkboxes to override localStorage")
+    else:
+        print("  [WARN] Could not find bomCheckboxes initialization logic")
 
     # =========================================================================
     # Step 3: Inject JS persistence functions
@@ -217,6 +314,129 @@ def patch_html(input_file, output_file):
       };
       input.click();
     }
+
+    // ========== 故障图功能 ==========
+    function getFaultImageKey() {
+      var boardId = pcbdata.metadata.title + "_" + pcbdata.metadata.date;
+      return storagePrefix + "fault_images_" + boardId;
+    }
+
+    function getFaultImages() {
+      var key = getFaultImageKey();
+      var data = storage ? storage.getItem(key) : null;
+      return data ? JSON.parse(data) : {};
+    }
+
+    function saveFaultImage(refId, base64Data) {
+      var images = getFaultImages();
+      images[refId] = base64Data;
+      if (storage) {
+        storage.setItem(getFaultImageKey(), JSON.stringify(images));
+      }
+    }
+
+    function deleteFaultImage(refId) {
+      var images = getFaultImages();
+      delete images[refId];
+      if (storage) {
+        storage.setItem(getFaultImageKey(), JSON.stringify(images));
+      }
+    }
+
+    function handleImageDrop(e, refId) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      var files = e.dataTransfer.files;
+      if (files.length === 0) return;
+      
+      var file = files[0];
+      if (!file.type.startsWith('image/')) {
+        alert('请拖入图片文件');
+        return;
+      }
+      
+      // 限制文件大小为 2MB
+      if (file.size > 2 * 1024 * 1024) {
+        alert('图片大小不能超过 2MB');
+        return;
+      }
+      
+      var reader = new FileReader();
+      reader.onload = function(evt) {
+        var base64 = evt.target.result;
+        saveFaultImage(refId, base64);
+        // 刷新显示
+        var td = document.getElementById('fault-img-' + refId);
+        if (td) {
+          td.innerHTML = '<span class="img-indicator">[图]</span>';
+          td.classList.add('has-image');
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function showImageModal(refId) {
+      var images = getFaultImages();
+      var base64 = images[refId];
+      if (!base64) return;
+      
+      var modal = document.getElementById('fault-image-modal');
+      var img = document.getElementById('fault-modal-img');
+      var deleteBtn = document.getElementById('fault-modal-delete');
+      
+      img.src = base64;
+      modal.classList.add('active');
+      
+      // 设置删除按钮的当前 refId
+      deleteBtn.onclick = function() {
+        if (confirm('确定要删除这张故障图吗？')) {
+          deleteFaultImage(refId);
+          modal.classList.remove('active');
+          // 刷新单元格显示
+          var td = document.getElementById('fault-img-' + refId);
+          if (td) {
+            td.innerHTML = '<span class="img-indicator">+</span>';
+            td.classList.remove('has-image');
+          }
+        }
+      };
+    }
+
+    function closeImageModal() {
+      var modal = document.getElementById('fault-image-modal');
+      modal.classList.remove('active');
+    }
+
+    function initFaultImageCell(td, refId) {
+      var images = getFaultImages();
+      var hasImage = images[refId];
+      
+      td.id = 'fault-img-' + refId;
+      td.className = 'fault-image-cell' + (hasImage ? ' has-image' : '');
+      td.innerHTML = hasImage ? '<span class="img-indicator">[图]</span>' : '<span class="img-indicator">+</span>';
+      td.title = hasImage ? '点击查看大图，拖入新图片替换' : '拖入图片';
+      
+      // 拖放事件
+      td.ondragover = function(e) {
+        e.preventDefault();
+        td.classList.add('drag-over');
+      };
+      td.ondragleave = function(e) {
+        td.classList.remove('drag-over');
+      };
+      td.ondrop = function(e) {
+        td.classList.remove('drag-over');
+        handleImageDrop(e, refId);
+      };
+      
+      // 点击显示大图
+      td.onclick = function(e) {
+        if (getFaultImages()[refId]) {
+          showImageModal(refId);
+        }
+      };
+    }
 """
     anchor = 'function populateBomHeader'
     if anchor in content:
@@ -350,6 +570,10 @@ def patch_html(input_file, output_file):
                                     };
                                 })(td, references[0][1], field_index);
                             }
+                            // 故障图单元格处理
+                            if (settings.bommode === "ungrouped" && column === "故障图") {
+                                initFaultImageCell(td, references[0][1]);
+                            }
     """
 
     def replacement(m):
@@ -362,6 +586,26 @@ def patch_html(input_file, output_file):
     else:
         print("  [WARN] Editable cell pattern NOT matched - double-click editing will NOT work")
         print("         Check that the iBOM JS structure contains the expected field-processing code")
+
+    # =========================================================================
+    # Step 7: Add image modal HTML before </body>
+    # =========================================================================
+    print("\n[Step 7] Adding image modal HTML...")
+    modal_html = """
+    <!-- 故障图弹窗 -->
+    <div id="fault-image-modal" class="image-modal" onclick="closeImageModal()">
+      <div class="image-modal-content" onclick="event.stopPropagation()">
+        <span class="image-modal-close" onclick="closeImageModal()">&times;</span>
+        <img id="fault-modal-img" src="" alt="故障图">
+        <button id="fault-modal-delete" class="image-modal-delete">删除图片</button>
+      </div>
+    </div>
+    """
+    if '</body>' in content:
+        content = content.replace('</body>', modal_html + '</body>')
+        print("  [OK] Image modal HTML added")
+    else:
+        print("  [WARN] </body> not found - modal HTML NOT added")
 
     # =========================================================================
     # Write output

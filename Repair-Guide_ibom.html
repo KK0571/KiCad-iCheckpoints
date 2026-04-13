@@ -985,6 +985,41 @@ a {
     .image-modal-delete:hover {
       background-color: #cc0000;
     }
+    .image-modal-nav {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      left: -50px;
+      width: 40px;
+      height: 60px;
+      background-color: rgba(255, 255, 255, 0.3);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      cursor: pointer;
+      border-radius: 4px;
+      user-select: none;
+    }
+    .image-modal-nav:hover {
+      background-color: rgba(255, 255, 255, 0.5);
+    }
+    .image-modal-nav-right {
+      left: auto;
+      right: -50px;
+    }
+    .image-modal-counter {
+      position: absolute;
+      top: -30px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #fff;
+      font-size: 14px;
+      background-color: rgba(0, 0, 0, 0.5);
+      padding: 4px 12px;
+      border-radius: 4px;
+    }
 </style>
   <script type="text/javascript" >
 ///////////////////////////////////////////////
@@ -3793,10 +3828,10 @@ function createColumnHeader(name, cls, comparator, is_checkbox = false) {
       input.click();
     }
 
-    // ========== 故障图功能 ==========
+    // ========== 故障图功能（多图片+自动压缩） ==========
     function getFaultImageKey() {
       var boardId = pcbdata.metadata.title + "_" + pcbdata.metadata.date;
-      return storagePrefix + "fault_images_" + boardId;
+      return storagePrefix + "fault_images_v2_" + boardId;
     }
 
     function getFaultImages() {
@@ -3805,95 +3840,233 @@ function createColumnHeader(name, cls, comparator, is_checkbox = false) {
       return data ? JSON.parse(data) : {};
     }
 
-    function saveFaultImage(refId, base64Data) {
-      var images = getFaultImages();
-      images[refId] = base64Data;
+    function saveFaultImages(refId, imagesArray) {
+      var allImages = getFaultImages();
+      allImages[refId] = imagesArray;
       if (storage) {
-        storage.setItem(getFaultImageKey(), JSON.stringify(images));
+        storage.setItem(getFaultImageKey(), JSON.stringify(allImages));
       }
     }
 
-    function deleteFaultImage(refId) {
-      var images = getFaultImages();
-      delete images[refId];
-      if (storage) {
-        storage.setItem(getFaultImageKey(), JSON.stringify(images));
+    function addFaultImage(refId, base64Data) {
+      var allImages = getFaultImages();
+      if (!allImages[refId]) {
+        allImages[refId] = [];
       }
+      allImages[refId].push(base64Data);
+      if (storage) {
+        storage.setItem(getFaultImageKey(), JSON.stringify(allImages));
+      }
+      return allImages[refId].length;
+    }
+
+    function deleteFaultImage(refId, index) {
+      var allImages = getFaultImages();
+      if (allImages[refId] && allImages[refId][index] !== undefined) {
+        allImages[refId].splice(index, 1);
+        if (allImages[refId].length === 0) {
+          delete allImages[refId];
+        }
+        if (storage) {
+          storage.setItem(getFaultImageKey(), JSON.stringify(allImages));
+        }
+        return true;
+      }
+      return false;
+    }
+
+    function deleteAllFaultImages(refId) {
+      var allImages = getFaultImages();
+      delete allImages[refId];
+      if (storage) {
+        storage.setItem(getFaultImageKey(), JSON.stringify(allImages));
+      }
+    }
+
+    // 压缩图片
+    function compressImage(base64, maxWidth, maxHeight, quality, callback) {
+      var img = new Image();
+      img.onload = function() {
+        var canvas = document.createElement('canvas');
+        var ctx = canvas.getContext('2d');
+        
+        var width = img.width;
+        var height = img.height;
+        
+        // 计算缩放比例
+        if (width > maxWidth || height > maxHeight) {
+          var ratio = Math.min(maxWidth / width, maxHeight / height);
+          width = Math.floor(width * ratio);
+          height = Math.floor(height * ratio);
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // 转换为 base64
+        var compressed = canvas.toDataURL('image/jpeg', quality);
+        callback(compressed);
+      };
+      img.src = base64;
+    }
+
+    function processAndSaveImage(file, refId, callback) {
+      var reader = new FileReader();
+      reader.onload = function(evt) {
+        var base64 = evt.target.result;
+        var sizeMB = base64.length / 1024 / 1024;
+        
+        // 如果小于 2MB 且不是 PNG，直接保存
+        if (sizeMB <= 2 && !file.type.includes('png')) {
+          var count = addFaultImage(refId, base64);
+          callback(count);
+          return;
+        }
+        
+        // 需要压缩
+        var quality = sizeMB > 4 ? 0.6 : 0.8;
+        compressImage(base64, 1920, 1080, quality, function(compressed) {
+          var newSizeMB = compressed.length / 1024 / 1024;
+          // 如果压缩后还是太大，进一步压缩
+          if (newSizeMB > 2) {
+            compressImage(base64, 1280, 720, 0.6, function(compressed2) {
+              var count = addFaultImage(refId, compressed2);
+              callback(count);
+            });
+          } else {
+            var count = addFaultImage(refId, compressed);
+            callback(count);
+          }
+        });
+      };
+      reader.readAsDataURL(file);
     }
 
     function handleImageDrop(e, refId) {
       e.preventDefault();
       e.stopPropagation();
       
-      var files = e.dataTransfer.files;
-      if (files.length === 0) return;
+      var files = Array.from(e.dataTransfer.files);
+      var imageFiles = files.filter(f => f.type.startsWith('image/'));
       
-      var file = files[0];
-      if (!file.type.startsWith('image/')) {
+      if (imageFiles.length === 0) {
         alert('请拖入图片文件');
         return;
       }
       
-      // 限制文件大小为 2MB
-      if (file.size > 2 * 1024 * 1024) {
-        alert('图片大小不能超过 2MB');
+      var processedCount = 0;
+      var totalCount = imageFiles.length;
+      
+      imageFiles.forEach(function(file) {
+        processAndSaveImage(file, refId, function() {
+          processedCount++;
+          if (processedCount === totalCount) {
+            // 所有图片处理完成，刷新显示
+            refreshFaultImageCell(refId);
+          }
+        });
+      });
+    }
+
+    function refreshFaultImageCell(refId) {
+      var allImages = getFaultImages();
+      var images = allImages[refId] || [];
+      var td = document.getElementById('fault-img-' + refId);
+      if (td) {
+        if (images.length === 0) {
+          td.innerHTML = '<span class="img-indicator">+</span>';
+          td.classList.remove('has-image');
+          td.title = '拖入图片';
+        } else {
+          td.innerHTML = '<span class="img-indicator">[' + images.length + '图]</span>';
+          td.classList.add('has-image');
+          td.title = '点击查看 ' + images.length + ' 张图片，拖入添加更多';
+        }
+      }
+    }
+
+    // 当前查看的图片索引
+    var currentModalRefId = null;
+    var currentModalIndex = 0;
+
+    function showImageModal(refId) {
+      var allImages = getFaultImages();
+      var images = allImages[refId];
+      if (!images || images.length === 0) return;
+      
+      currentModalRefId = refId;
+      currentModalIndex = 0;
+      
+      updateModalImage();
+      
+      var modal = document.getElementById('fault-image-modal');
+      modal.classList.add('active');
+    }
+
+    function updateModalImage() {
+      var allImages = getFaultImages();
+      var images = allImages[currentModalRefId] || [];
+      
+      if (images.length === 0) {
+        closeImageModal();
         return;
       }
       
-      var reader = new FileReader();
-      reader.onload = function(evt) {
-        var base64 = evt.target.result;
-        saveFaultImage(refId, base64);
-        // 刷新显示
-        var td = document.getElementById('fault-img-' + refId);
-        if (td) {
-          td.innerHTML = '<span class="img-indicator">[图]</span>';
-          td.classList.add('has-image');
-        }
-      };
-      reader.readAsDataURL(file);
+      var img = document.getElementById('fault-modal-img');
+      var counter = document.getElementById('fault-modal-counter');
+      
+      img.src = images[currentModalIndex];
+      if (counter) {
+        counter.textContent = (currentModalIndex + 1) + ' / ' + images.length;
+      }
     }
 
-    function showImageModal(refId) {
-      var images = getFaultImages();
-      var base64 = images[refId];
-      if (!base64) return;
+    function nextImage() {
+      var allImages = getFaultImages();
+      var images = allImages[currentModalRefId] || [];
+      currentModalIndex = (currentModalIndex + 1) % images.length;
+      updateModalImage();
+    }
+
+    function prevImage() {
+      var allImages = getFaultImages();
+      var images = allImages[currentModalRefId] || [];
+      currentModalIndex = (currentModalIndex - 1 + images.length) % images.length;
+      updateModalImage();
+    }
+
+    function deleteCurrentImage() {
+      if (currentModalRefId === null) return;
       
-      var modal = document.getElementById('fault-image-modal');
-      var img = document.getElementById('fault-modal-img');
-      var deleteBtn = document.getElementById('fault-modal-delete');
-      
-      img.src = base64;
-      modal.classList.add('active');
-      
-      // 设置删除按钮的当前 refId
-      deleteBtn.onclick = function() {
-        if (confirm('确定要删除这张故障图吗？')) {
-          deleteFaultImage(refId);
-          modal.classList.remove('active');
-          // 刷新单元格显示
-          var td = document.getElementById('fault-img-' + refId);
-          if (td) {
-            td.innerHTML = '<span class="img-indicator">+</span>';
-            td.classList.remove('has-image');
+      if (confirm('确定要删除这张图片吗？')) {
+        deleteFaultImage(currentModalRefId, currentModalIndex);
+        
+        var allImages = getFaultImages();
+        var images = allImages[currentModalRefId] || [];
+        
+        if (images.length === 0) {
+          closeImageModal();
+          refreshFaultImageCell(currentModalRefId);
+        } else {
+          if (currentModalIndex >= images.length) {
+            currentModalIndex = images.length - 1;
           }
+          updateModalImage();
+          refreshFaultImageCell(currentModalRefId);
         }
-      };
+      }
     }
 
     function closeImageModal() {
       var modal = document.getElementById('fault-image-modal');
       modal.classList.remove('active');
+      currentModalRefId = null;
+      currentModalIndex = 0;
     }
 
     function initFaultImageCell(td, refId) {
-      var images = getFaultImages();
-      var hasImage = images[refId];
-      
-      td.id = 'fault-img-' + refId;
-      td.className = 'fault-image-cell' + (hasImage ? ' has-image' : '');
-      td.innerHTML = hasImage ? '<span class="img-indicator">[图]</span>' : '<span class="img-indicator">+</span>';
-      td.title = hasImage ? '点击查看大图，拖入新图片替换' : '拖入图片';
+      refreshFaultImageCell(refId);
       
       // 拖放事件
       td.ondragover = function(e) {
@@ -3910,7 +4083,8 @@ function createColumnHeader(name, cls, comparator, is_checkbox = false) {
       
       // 点击显示大图
       td.onclick = function(e) {
-        if (getFaultImages()[refId]) {
+        var allImages = getFaultImages();
+        if (allImages[refId] && allImages[refId].length > 0) {
           showImageModal(refId);
         }
       };
@@ -5117,8 +5291,11 @@ window.matchMedia("print").addListener(resizeAll);
     <div id="fault-image-modal" class="image-modal" onclick="closeImageModal()">
       <div class="image-modal-content" onclick="event.stopPropagation()">
         <span class="image-modal-close" onclick="closeImageModal()">&times;</span>
+        <div class="image-modal-nav" onclick="prevImage(); event.stopPropagation();">&lt;</div>
         <img id="fault-modal-img" src="" alt="故障图">
-        <button id="fault-modal-delete" class="image-modal-delete">删除图片</button>
+        <div class="image-modal-nav image-modal-nav-right" onclick="nextImage(); event.stopPropagation();">&gt;</div>
+        <div id="fault-modal-counter" class="image-modal-counter">1 / 1</div>
+        <button id="fault-modal-delete" class="image-modal-delete" onclick="deleteCurrentImage(); event.stopPropagation();">删除当前图片</button>
       </div>
     </div>
     </body>
