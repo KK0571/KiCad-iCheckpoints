@@ -114,7 +114,6 @@ def patch_html(input_file, output_file):
           var savedFields = JSON.parse(data);
           var fpIdx  = config.fields.indexOf("故障点");
           var fphIdx = config.fields.indexOf("故障现象");
-          // Use for...in to handle both array and object forms of pcbdata.bom.fields
           for (var id in savedFields) {
             if (savedFields[id] && pcbdata.bom.fields[id]) {
               if (fpIdx  !== -1 && savedFields[id][fpIdx]  !== undefined)
@@ -138,6 +137,85 @@ def patch_html(input_file, output_file):
           location.reload();
         }
       }
+    }
+
+    function exportRepairInfo() {
+      var boardId = pcbdata.metadata.title + "_" + pcbdata.metadata.date;
+      var key = "ibom_custom_fields_" + boardId;
+      var data = null;
+      if (storage) {
+        data = storage.getItem(storagePrefix + key);
+      }
+      if (!data) {
+        alert("没有维修信息可导出 (No repair info to export)");
+        return;
+      }
+      // Create export object with metadata
+      var exportObj = {
+        version: 1,
+        board: {
+          title: pcbdata.metadata.title,
+          revision: pcbdata.metadata.revision,
+          date: pcbdata.metadata.date
+        },
+        fields: config.fields,
+        data: JSON.parse(data)
+      };
+      var jsonStr = JSON.stringify(exportObj, null, 2);
+      var blob = new Blob([jsonStr], { type: "application/json" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      var filename = "RepairInfo_" + pcbdata.metadata.title + "_" + pcbdata.metadata.date + ".json";
+      a.href = url;
+      a.download = filename.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      alert("维修信息已导出: " + filename);
+    }
+
+    function importRepairInfo() {
+      var input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".json,application/json";
+      input.onchange = function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function(evt) {
+          try {
+            var importObj = JSON.parse(evt.target.result);
+            // Validate version
+            if (!importObj.version || importObj.version !== 1) {
+              alert("不支持的文件格式版本 (Unsupported file version)");
+              return;
+            }
+            // Validate board match (warn but allow override)
+            var currentBoard = pcbdata.metadata.title + "_" + pcbdata.metadata.revision;
+            var importBoard = (importObj.board.title || "") + "_" + (importObj.board.revision || "");
+            if (currentBoard !== importBoard) {
+              var proceed = confirm("警告: 文件来自不同的板子\\n" +
+                "当前: " + currentBoard + "\\n" +
+                "文件: " + importBoard + "\\n\\n" +
+                "仍要继续导入吗？");
+              if (!proceed) return;
+            }
+            // Save to localStorage
+            var boardId = pcbdata.metadata.title + "_" + pcbdata.metadata.date;
+            var key = "ibom_custom_fields_" + boardId;
+            if (storage) {
+              storage.setItem(storagePrefix + key, JSON.stringify(importObj.data));
+              alert("导入成功，页面将刷新以显示数据");
+              location.reload();
+            }
+          } catch (err) {
+            alert("导入失败: " + err.message);
+          }
+        };
+        reader.readAsText(file);
+      };
+      input.click();
     }
 """
     anchor = 'function populateBomHeader'
@@ -205,9 +283,15 @@ def patch_html(input_file, output_file):
     menu_clear_btn = """
             <div class="menu-label menu-label-top">
               <span style="margin-left: 5px; font-weight: bold;">维修信息 (Repair Info)</span>
+              <div class="flexbox" style="margin-top: 5px; gap: 5px;">
+                <button class="savebtn" style="flex: 1; cursor: pointer; padding: 5px; font-size: 12px;"
+                        onclick="exportRepairInfo()">导出 (Export)</button>
+                <button class="savebtn" style="flex: 1; cursor: pointer; padding: 5px; font-size: 12px;"
+                        onclick="importRepairInfo()">导入 (Import)</button>
+              </div>
               <div class="flexbox" style="margin-top: 5px;">
-                <button class="savebtn" style="width: 100%; cursor: pointer; padding: 5px;"
-                        onclick="clearRepairInfo()">清除所有维修信息 (Clear All)</button>
+                <button class="savebtn" style="width: 100%; cursor: pointer; padding: 5px; font-size: 12px;"
+                        onclick="clearRepairInfo()">清除所有 (Clear All)</button>
               </div>
             </div>
             """
